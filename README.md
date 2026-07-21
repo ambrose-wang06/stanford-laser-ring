@@ -58,25 +58,60 @@ All parts were designed in Onshape and printed in PLA on a Prusa i3 MK3 for stru
 3. For any diode off by more than 2 mm at the calibration ring, use the adjustment screw on that diode's ball-joint housing to re-align it until the beam passes through its aperture.
 4. Repeat daily until stability is established; the system can move to monthly QA checks once alignment drift is confirmed to stay under 1 mm over time.
 
-## Running the Code
+## Software
 
-The Arduino code (in [`/code`](./code)) controls the 8 laser segments independently and listens for collision-warning signals.
+The predictive warning system has **three parts** that hand data off to each other in sequence:
 
-1. Install the [Arduino IDE](https://www.arduino.cc/en/software).
-2. Connect the Arduino to your computer via USB.
-3. Open the sketch from the `/code` folder in this repo.
-4. In the Arduino IDE, select your board under **Tools > Board** and the correct port under **Tools > Port**.
-5. Click **Upload** to flash the code to the Arduino.
-6. Once uploaded, power the ring on using the remote sensor. The ring should project as a complete circle on the gantry when there is no obstruction.
-7. To enable predictive (TPS-driven) segment flashing, connect the Arduino to the PC running the collision-prediction integration and follow the setup steps in [`/code`](./code) for linking it to your data source.
+1. **`RingCollisionDetection_Script/`** — an Eclipse Scripting API (ESAPI) plugin that runs *inside Varian Eclipse*. When run against an open plan, it checks the patient's BODY/EXTERNAL/SUPPORT structures against the linac geometry, works out which of the 8 laser segments (if any) are predicted to collide, and writes the result to a shared JSON file named `{MRN}.json`.
+2. **`RingCollCommunicator/`** — a Windows console app (.NET) that runs on the PC connected to the Arduino via USB. It auto-detects the Arduino's COM port, looks up which patient is currently "In Progress" on the treatment machine in ARIA, reads that patient's `{MRN}.json` file, and sends the list of colliding segment numbers to the Arduino over serial.
+3. **`Arduino Code/SerialOnly_5_29_2026/`** — the sketch that runs on the Arduino itself, described below.
 
-> ⚠️ This section is a general outline — add the exact sketch filename, required libraries, and any pin mapping/config specific to your build once the `/code` folder is finalized, so future users can follow it exactly.
+### How a treatment session runs
+
+1. Therapist points an IR remote at the ring and presses the power button.
+2. The Arduino turns **all 8 segments on solid** and sends `ReadyForSegments` over serial.
+3. The Communicator app receives that, looks up the in-progress patient in ARIA, reads their collision JSON, and sends back either `CLEAR` (no predicted collisions — lasers stay solid) or a comma-separated list of segment numbers (e.g. `3,4`).
+4. The Arduino sets those specific segments to **blink** while the rest stay solid, giving the therapist a location-specific warning.
+5. Pressing the IR remote again turns everything off.
+
+### Setup
+
+**1. Eclipse Scripting API script**
+- Add `RingCollisionDetection.cs` and `CollisonDetection.cs` to your Eclipse Scripting API project (references `VMS.TPS.Common.Model.API`, `Newtonsoft.Json`) and get it approved/verified per your institution's Eclipse scripting workflow.
+- Set the shared `FolderPath` in `CollisionFileWriter` (top of `RingCollisionDetection.cs`) to the network location the Communicator app will also read from.
+
+**2. RingCollCommunicator (PC app)**
+- Requires **Newtonsoft.Json**, **System.Management**, and your institution's ARIA connectivity library (referenced as `RingAriaQ` / `RingAria` — not included in this repo; link against your own ARIA API library).
+- Set `machineId` in `Program.cs` to the treatment machine's ID in ARIA.
+- Set `FolderPath` in `CollisionFileReader` to the **same** shared folder used by the Eclipse script above.
+- Build and run this app on the PC that's plugged into the Arduino via USB. It will wait until it detects an Arduino, then listen continuously.
+
+**3. Arduino**
+- Install the [Arduino IDE](https://www.arduino.cc/en/software) and the **IRremote** library (`IRremote.hpp`, by Armin Joachimsmeyer — install via Library Manager).
+- Open `Arduino Code/SerialOnly_5_29_2026/SerialOnly_5_29_2026.ino`.
+- Under **Tools > Board**, select your board; under **Tools > Port**, select the Arduino's port.
+- Click **Upload**.
+- Connect an IR receiver to pin 14, and the 8 segment relay lines to the pins listed in `relayPins[]` in the sketch.
+
+### ⚠️ Known issues to resolve before deployment
+
+- **`FolderPath` is a placeholder (redacted) in both `RingCollisionDetection.cs` and `Program.cs`.** These must be filled in with a real, matching path before the two apps can hand off data.
+- **`machineId` in `Program.cs` is also a placeholder** — set this to your treatment machine's actual ARIA ID.
+- **`Program.cs` references a variable `inProgressLA2Pt`** when logging the "in-progress patient found" message, but the variable that's actually populated is `inProgressPt`. As written, this will not compile — needs a fix (likely just renaming to `inProgressPt`).
+- **Relay pins 0 and 1 are used as digital outputs** in the Arduino sketch (`relayPins[] = {5, 4, 3, 2, 1, 0, A6, A5}`), but pins 0/1 are the hardware Serial RX/TX lines on most Arduino boards. Since this sketch also uses `Serial` for communication with the Communicator app, double-check this doesn't cause conflicts on your specific board.
 
 ## Repository Structure
 
 ```
-├── STL/           # 3D printable parts (see Bill of Materials)
-├── code/          # Arduino sketch(es) for laser ring control
+├── STL/                                    # 3D printable parts (see Bill of Materials)
+├── RingCollisionDetection_Script/          # Eclipse Scripting API plugin (runs in Varian Eclipse)
+│   ├── RingCollisionDetection.cs
+│   └── CollisonDetection.cs
+├── RingCollCommunicator/                   # Windows console app — bridges Eclipse/ARIA data to the Arduino
+│   └── Program.cs
+├── Arduino Code/
+│   └── SerialOnly_5_29_2026/
+│       └── SerialOnly_5_29_2026.ino        # Arduino sketch — relay/segment control + IR power toggle
 └── README.md
 ```
 
